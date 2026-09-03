@@ -612,8 +612,8 @@ async function renderWithWebCodecs({
     videoEncoder.encode(videoFrame, { keyFrame: frameIndex % 60 === 0 });
     videoFrame.close();
 
-    // Yield control periodically to avoid UI blocking and provide precise progress
-    if (frameIndex % 12 === 0 || frameIndex === totalFrames - 1) {
+    // Yield control frequently every 3 frames to avoid UI freezing on mobile devices
+    if (frameIndex % 3 === 0 || frameIndex === totalFrames - 1) {
       const elapsed = (performance.now() - renderStart) / 1000;
       const currentFps = Math.round((frameIndex + 1) / Math.max(0.1, elapsed));
       const percent = Math.min(94, 38 + Math.round((frameIndex / totalFrames) * 56));
@@ -710,16 +710,18 @@ async function renderWithFFmpegFallback({
   ]);
 
   const mimeTypes = [
+    'video/mp4;codecs=avc1,mp4a.40.2',
+    'video/mp4;codecs=h264,aac',
+    'video/mp4',
     'video/webm;codecs=vp9,opus',
     'video/webm;codecs=vp8,opus',
     'video/webm',
-    'video/mp4',
   ];
   let chosenMime = mimeTypes.find((m) => MediaRecorder.isTypeSupported(m)) || 'video/webm';
 
   const recorder = new MediaRecorder(combinedStream, {
     mimeType: chosenMime,
-    videoBitsPerSecond: 6000000,
+    videoBitsPerSecond: 5000000,
   });
 
   const recordedChunks = [];
@@ -808,6 +810,27 @@ async function renderWithFFmpegFallback({
   const tRender = performance.now() - startTime;
 
   const recordedBlob = new Blob(recordedChunks, { type: chosenMime });
+
+  // If already native MP4, return immediately without running FFmpeg.wasm!
+  if (chosenMime.includes('mp4') || typeof SharedArrayBuffer === 'undefined') {
+    const videoUrl = URL.createObjectURL(recordedBlob);
+    const ext = chosenMime.includes('mp4') ? 'mp4' : 'webm';
+    onProgress({
+      step: 'complete',
+      progress: 100,
+      message: 'تم إنشاء الفيديو بنجاح! جاهز للمعاينة والتحميل.',
+    });
+    return {
+      videoUrl,
+      blob: recordedBlob,
+      filename: `tarteel_${chapter.id}_${verses[0].verse_number}-${verses[verses.length - 1].verse_number}.${ext}`,
+      timings: {
+        engine: chosenMime.includes('mp4') ? 'Native MP4 Hardware Direct' : 'Direct MediaRecorder',
+        renderMs: tRender,
+        transcodeMs: 0,
+      },
+    };
+  }
 
   console.time('⏱️ Phase 4: FFmpeg.wasm Transcoding to MP4');
   const transcodeStart = performance.now();
@@ -956,9 +979,11 @@ export async function generateQuranVideo({
     message: `تم تجهيز التلاوة بنجاح (المدة الإجمالية: ${Math.ceil(totalDuration)} ثانية)`,
   });
 
-  // Step 2: Set up Canvas for rendering (guaranteed even pixel dimensions)
-  const width = Math.floor((config.aspectRatio === '9:16' ? 1080 : 1920) / 2) * 2;
-  const height = Math.floor((config.aspectRatio === '9:16' ? 1920 : 1080) / 2) * 2;
+  // Step 2: Set up Canvas for rendering (Adaptive resolution: 720p on mobile to eliminate freezes, 1080p on desktop)
+  const isMobile = typeof navigator !== 'undefined' && (/Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (typeof window !== 'undefined' && window.innerWidth < 768));
+  const targetBase = isMobile ? 720 : 1080;
+  const width = Math.floor((config.aspectRatio === '9:16' ? targetBase : Math.round(targetBase * 16 / 9)) / 2) * 2;
+  const height = Math.floor((config.aspectRatio === '9:16' ? Math.round(targetBase * 16 / 9) : targetBase) / 2) * 2;
 
   const canvas = document.createElement('canvas');
   canvas.width = width;

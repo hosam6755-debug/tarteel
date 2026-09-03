@@ -1,52 +1,23 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect } from 'react';
 import {
   Sparkles,
   Download,
   CheckCircle2,
   X,
   AlertCircle,
-  CloudLightning,
-  RefreshCw,
+  Zap,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
-import { subscribeToVideoJob } from '../services/videoJobService';
 
 export default function VideoExportModal({
   isOpen,
   onClose,
-  jobId,
-  initialProgressInfo,
+  progressInfo,
+  resultVideo,
 }) {
-  const [jobData, setJobData] = useState(null);
-  const [subscriptionError, setSubscriptionError] = useState(null);
-
   useEffect(() => {
-    if (!isOpen || !jobId) {
-      setJobData(null);
-      setSubscriptionError(null);
-      return;
-    }
-
-    // Subscribe to Firestore videoJobs updates
-    const unsubscribe = subscribeToVideoJob(
-      jobId,
-      (data) => {
-        setJobData(data);
-      },
-      (err) => {
-        console.error('Failed to subscribe to job:', err);
-        setSubscriptionError(err.message || 'فشل الاتصال بتحديثات المعالجة');
-      }
-    );
-
-    return () => {
-      unsubscribe();
-    };
-  }, [isOpen, jobId]);
-
-  // Trigger celebration confetti when video completes
-  useEffect(() => {
-    if (jobData?.status === 'completed' && isOpen) {
+    if (resultVideo && isOpen) {
+      // Trigger golden confetti celebration on completion
       try {
         confetti({
           particleCount: 80,
@@ -56,21 +27,12 @@ export default function VideoExportModal({
         });
       } catch (e) {}
     }
-  }, [jobData?.status, isOpen]);
+  }, [resultVideo, isOpen]);
 
   if (!isOpen) return null;
 
-  const isDone = jobData?.status === 'completed';
-  const isError = jobData?.status === 'failed' || !!subscriptionError;
-  const progress = jobData?.progress ?? initialProgressInfo?.progress ?? 5;
-  const message =
-    subscriptionError ||
-    jobData?.error?.message ||
-    jobData?.stepMessage ||
-    initialProgressInfo?.message ||
-    'جاري إرسال الطلب إلى السيرفر...';
-
-  const videoUrl = jobData?.result?.videoUrl;
+  const isDone = !!resultVideo;
+  const isError = progressInfo?.step === 'error';
 
   return (
     <div className="modal-backdrop">
@@ -110,14 +72,14 @@ export default function VideoExportModal({
               ? 'تم إنشاء الفيديو بنجاح!'
               : isError
               ? 'حدث خطأ أثناء التوليد'
-              : 'جاري توليد الفيديو على السيرفر...'}
+              : 'جاري توليد الفيديو القرآني...'}
           </h2>
           <p className="modal-subtitle">
             {isDone
-              ? 'الفيديو جاهز الآن للمعاينة والتحميل بجودة عالية (MP4) من الخادم السحابي.'
+              ? 'الفيديو جاهز الآن للمعاينة والتحميل بصيغة MP4 بجودة عالية.'
               : isError
-              ? message
-              : 'يتم الآن معالجة الإطارات والصوت بـ FFmpeg على خوادم سحابية فائقة السرعة.'}
+              ? progressInfo.message
+              : 'يتم الآن معالجة وترميز الإطارات بتسريع العتاد المحلي بدون أي خوادم خارجية.'}
           </p>
         </div>
 
@@ -127,7 +89,10 @@ export default function VideoExportModal({
             <div className="progress-bar-track">
               <div
                 className="progress-bar-fill"
-                style={{ width: `${Math.max(5, progress)}%`, transition: 'width 0.4s ease' }}
+                style={{
+                  width: `${Math.max(5, progressInfo.progress || 5)}%`,
+                  transition: 'width 0.3s ease',
+                }}
               />
             </div>
             <div
@@ -138,33 +103,16 @@ export default function VideoExportModal({
                 color: 'var(--text-muted)',
               }}
             >
-              <span className="step-indicator-text">{message}</span>
+              <span className="step-indicator-text">{progressInfo.message}</span>
               <span style={{ fontFamily: 'var(--font-latin)', fontWeight: 700 }}>
-                {progress}%
+                {progressInfo.progress || 5}%
               </span>
             </div>
           </div>
         )}
 
-        {/* Error message detail box */}
-        {isError && (
-          <div
-            style={{
-              padding: '12px 16px',
-              borderRadius: 'var(--radius-sm)',
-              background: 'rgba(239, 68, 68, 0.12)',
-              border: '1px solid rgba(239, 68, 68, 0.3)',
-              color: '#fca5a5',
-              fontSize: '0.86rem',
-              textAlign: 'right',
-            }}
-          >
-            {message}
-          </div>
-        )}
-
         {/* Video Preview when complete */}
-        {isDone && videoUrl && (
+        {isDone && resultVideo && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
             <div
               style={{
@@ -179,7 +127,7 @@ export default function VideoExportModal({
               }}
             >
               <video
-                src={videoUrl}
+                src={resultVideo.videoUrl}
                 controls
                 autoPlay
                 playsInline
@@ -189,10 +137,8 @@ export default function VideoExportModal({
 
             <div style={{ display: 'flex', gap: '12px', justifyContent: 'center' }}>
               <a
-                href={videoUrl}
-                target="_blank"
-                rel="noreferrer"
-                download={`quran_video_${jobId || Date.now()}.mp4`}
+                href={resultVideo.videoUrl}
+                download={resultVideo.filename || 'quran_video.mp4'}
                 className="btn-modal-action primary"
                 style={{ textDecoration: 'none', flex: 1 }}
               >
@@ -207,7 +153,7 @@ export default function VideoExportModal({
           </div>
         )}
 
-        {/* Footer info tip for mobile performance */}
+        {/* Footer info tip */}
         <div
           style={{
             fontSize: '0.78rem',
@@ -219,11 +165,11 @@ export default function VideoExportModal({
             gap: '6px',
           }}
         >
-          <CloudLightning size={14} style={{ color: 'var(--accent-gold)' }} />
+          <Zap size={14} style={{ color: 'var(--accent-gold)' }} />
           <span>
             {isDone
-              ? 'تمت المعالجة على السيرفر السحابي دون استهلاك لموارد هاتفك'
-              : 'معالجة سحابية: يمكنك التنقل في هاتفك بحرية وستستمر المعالجة بالسيرفر'}
+              ? '⚡ تم إنتاج الفيديو مباشرة داخل جهازك بدون استهلاك إنترنت إضافي'
+              : '🔒 معالجة عتادية فائقة السرعة على جهازك لحماية خصوصيتك وبياناتك'}
           </span>
         </div>
       </div>

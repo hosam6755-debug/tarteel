@@ -11,7 +11,9 @@ import {
   getVerseAudioList,
 } from '../services/quranApi';
 import { PRESET_BACKGROUNDS } from '../constants/presets';
-import { createVideoJob } from '../services/videoJobService';
+import { generateQuranVideo } from '../services/videoRenderer';
+import { db } from '../lib/firebase';
+import { collection, addDoc, query, where, getDocs } from 'firebase/firestore';
 
 export default function Home({ user, userData }) {
   // App Data State
@@ -52,14 +54,15 @@ export default function Home({ user, userData }) {
   const [currentAyahIndex, setCurrentAyahIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
 
-  // Video Export Modal & Server Job State
+  // Video Export Modal State (100% Client-Side)
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
-  const [activeJobId, setActiveJobId] = useState(null);
-  const [initialProgressInfo, setInitialProgressInfo] = useState({
-    progress: 5,
-    message: 'جاري إرسال الطلب إلى السيرفر...',
+  const [progressInfo, setProgressInfo] = useState({
+    step: 'idle',
+    progress: 0,
+    message: '',
   });
+  const [resultVideo, setResultVideo] = useState(null);
 
   // 1. Initial Load: Chapters, Reciters, Translations
   useEffect(() => {
@@ -123,7 +126,7 @@ export default function Home({ user, userData }) {
     loadAudioData();
   }, [config.reciterId, config.chapterId, config.fromAyah, config.toAyah, verses]);
 
-  // Handle Video Generation Trigger (Dispatches Job to Server via Firestore)
+  // Handle Client-Side Video Generation Trigger
   const handleGenerateVideo = async () => {
     if (verses.length === 0 || audioList.length === 0) {
       alert('يرجى الانتظار حتى اكتمال تحميل الآيات والتلاوة');
@@ -135,31 +138,69 @@ export default function Home({ user, userData }) {
       return;
     }
 
+    // Check Daily Quota (client-side Firestore lookup)
+    try {
+      const today = new Date().toISOString().split('T')[0];
+      const q = query(
+        collection(db, 'generations'),
+        where('userId', '==', user.uid),
+        where('date', '==', today)
+      );
+      const querySnapshot = await getDocs(q);
+
+      const limit = userData?.daily_limit || 2;
+      if (querySnapshot.size >= limit && userData?.role !== 'admin') {
+        alert(`لقد استنفدت الحد اليومي المسموح لك (${limit} فيديو). يرجى المحاولة غداً.`);
+        return;
+      }
+    } catch (err) {
+      console.warn('Quota check skipped or failed:', err);
+    }
+
     setIsGenerating(true);
-    setInitialProgressInfo({
+    setIsModalOpen(true);
+    setResultVideo(null);
+    setProgressInfo({
+      step: 'init',
       progress: 5,
-      message: 'جاري إنشاء طلب التوليد على السيرفر...',
+      message: 'جاري بدء معالجة الفيديو في جهازك...',
     });
 
     const activeChapter = chapters.find((c) => c.id === config.chapterId) || chapters[0];
 
     try {
-      // Create server job in Firestore "videoJobs"
-      const jobId = await createVideoJob({
-        user,
-        userData,
+      // 100% Client-Side generation with WebCodecs and adaptive resolution
+      const output = await generateQuranVideo({
         config,
         chapter: activeChapter,
         verses,
         audioList,
+        onProgress: (prog) => {
+          setProgressInfo(prog);
+        },
       });
 
-      setActiveJobId(jobId);
-      setIsModalOpen(true);
+      // Register generation in Firestore
+      try {
+        const today = new Date().toISOString().split('T')[0];
+        await addDoc(collection(db, 'generations'), {
+          userId: user.uid,
+          date: today,
+          timestamp: new Date().toISOString(),
+        });
+      } catch (e) {
+        console.warn('Failed to log generation:', e);
+      }
+
+      setResultVideo(output);
       setIsGenerating(false);
     } catch (err) {
-      console.error('Video generation initiation failed:', err);
-      alert(err.message || 'حدث خطأ أثناء إرسال طلب التوليد.');
+      console.error('Video generation failed:', err);
+      setProgressInfo({
+        step: 'error',
+        progress: 0,
+        message: 'فشلت عملية التوليد: ' + (err.message || 'حدث خطأ غير متوقع'),
+      });
       setIsGenerating(false);
     }
   };
@@ -198,11 +239,12 @@ export default function Home({ user, userData }) {
 
       <VideoExportModal
         isOpen={isModalOpen}
-        jobId={activeJobId}
-        initialProgressInfo={initialProgressInfo}
         onClose={() => {
           setIsModalOpen(false);
+          setResultVideo(null);
         }}
+        progressInfo={progressInfo}
+        resultVideo={resultVideo}
       />
     </div>
   );

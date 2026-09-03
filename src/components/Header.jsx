@@ -13,7 +13,7 @@ export default function Header({ user, userData }) {
     <header className="app-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
       <div className="brand-group">
         <img
-          src="/tarteel-logo.png"
+          src="/tarteel-logo.svg"
           alt="شعار ترتيل"
           className="brand-logo-img"
           style={{

@@ -93,6 +93,7 @@ export async function getFFmpeg(onLog) {
 
 /**
  * Draw a single frame to the canvas
+ * textAlpha: 0-1 controls verse text opacity for smooth fade in/out transitions
  */
 export function drawCanvasFrame({
   ctx,
@@ -103,6 +104,7 @@ export function drawCanvasFrame({
   currentVerse,
   bgMediaElement,
   watermarkImg,
+  textAlpha = 1,
 }) {
   // Clear canvas
   ctx.clearRect(0, 0, width, height);
@@ -223,7 +225,8 @@ export function drawCanvasFrame({
   const badgeX = (width - badgeW) / 2;
   const badgeY = height * 0.09;
 
-  // Badge background pill
+  // Badge background pill (fades with verse)
+  ctx.globalAlpha = textAlpha;
   ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
   ctx.beginPath();
   ctx.roundRect(badgeX, badgeY, badgeW, badgeH, badgeH / 2);
@@ -238,9 +241,10 @@ export function drawCanvasFrame({
   ctx.fillText(badgeText, width / 2, badgeY + badgeH / 2);
   ctx.restore();
 
-  // 5. Quran Verse Arabic Text (Centered)
+  // 5. Quran Verse Arabic Text (Centered) — with fade alpha
   if (currentVerse) {
     ctx.save();
+    ctx.globalAlpha = textAlpha;
     // Scale font size proportionally for high-res output
     const scaleFactor = width / 400;
     const arabicFontSize = Math.round((config.quranFontSize || 30) * scaleFactor);
@@ -271,9 +275,10 @@ export function drawCanvasFrame({
     });
     ctx.restore();
 
-    // 6. Translation Subtitles
+    // 6. Translation Subtitles — with fade alpha
     if (config.showTranslation && currentVerse.translations?.[0]?.text) {
       ctx.save();
+      ctx.globalAlpha = textAlpha;
       const transText = currentVerse.translations[0].text;
       const transFontSize = Math.round((config.translationFontSize || 16) * scaleFactor);
       ctx.font = `500 ${transFontSize}px 'Outfit', sans-serif`;
@@ -525,30 +530,54 @@ async function renderWithWebCodecs({
   }
 
   // 5. Offline Frame-by-Frame Rendering on Canvas (Up to 5x-10x faster than real-time)
+  console.time('⏱️ Phase 3: WebCodecs Frame Rendering');
+  const renderStart = performance.now();
+
+  const FADE_DURATION = 0.35; // seconds for fade in / fade out
   const totalFrames = Math.max(1, Math.ceil(totalDuration * fps));
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext('2d');
 
-  const renderStart = performance.now();
+  // Build a verse lookup map: verse_number -> verse object (O(1) lookup)
+  const verseByNumber = {};
+  for (const v of verses) {
+    verseByNumber[v.verse_number] = v;
+  }
 
   for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
     const timestampSec = frameIndex / fps;
 
-    // Find active verse
-    let activeVerse = verses[0];
+    // Find the active versetiming whose window covers the current timestamp
+    let activeTiming = verseTimings[verseTimings.length - 1];
     for (let i = 0; i < verseTimings.length; i++) {
-      if (timestampSec >= verseTimings[i].startTime && timestampSec <= verseTimings[i].endTime) {
-        activeVerse = verses[i] || verses[0];
+      if (timestampSec <= verseTimings[i].endTime) {
+        activeTiming = verseTimings[i];
         break;
       }
     }
-    if (timestampSec > totalDuration && verseTimings.length > 0) {
-      activeVerse = verses[verses.length - 1];
-    }
 
-    // Draw frame onto canvas
+    // Look up the verse object by verse_number (correct matching, not by index)
+    const activeVerse =
+      verseByNumber[activeTiming.verse_number] ||
+      verses.find((v) => v.verse_key === activeTiming.verse_key) ||
+      verses[0];
+
+    // Calculate smooth fade alpha:
+    // Fade IN during first FADE_DURATION seconds of the verse
+    // Fade OUT during last FADE_DURATION seconds of the verse
+    const verseElapsed = timestampSec - activeTiming.startTime;
+    const verseDuration = activeTiming.endTime - activeTiming.startTime;
+    let textAlpha = 1;
+    if (verseElapsed < FADE_DURATION) {
+      textAlpha = verseElapsed / FADE_DURATION; // 0 → 1 fade in
+    } else if (verseDuration > FADE_DURATION * 2 && verseElapsed > verseDuration - FADE_DURATION) {
+      textAlpha = (verseDuration - verseElapsed) / FADE_DURATION; // 1 → 0 fade out
+    }
+    textAlpha = Math.max(0, Math.min(1, textAlpha));
+
+    // Draw frame onto canvas with correct verse and smooth alpha
     drawCanvasFrame({
       ctx,
       width,
@@ -558,6 +587,7 @@ async function renderWithWebCodecs({
       currentVerse: activeVerse,
       bgMediaElement,
       watermarkImg,
+      textAlpha,
     });
 
     // Pass frame to GPU Hardware VideoEncoder
@@ -581,7 +611,13 @@ async function renderWithWebCodecs({
     }
   }
 
+  console.timeEnd('⏱️ Phase 3: WebCodecs Frame Rendering');
+  const tRender = performance.now() - renderStart;
+
   // 6. Finalize Encoders and Multiplex to MP4
+  console.time('⏱️ Phase 4: WebCodecs Finalizing & MP4 Muxing');
+  const transcodeStart = performance.now();
+
   onProgress({
     step: 'finalizing',
     progress: 96,
@@ -598,6 +634,9 @@ async function renderWithWebCodecs({
   const mp4Blob = new Blob([buffer], { type: 'video/mp4' });
   const videoUrl = URL.createObjectURL(mp4Blob);
 
+  console.timeEnd('⏱️ Phase 4: WebCodecs Finalizing & MP4 Muxing');
+  const tTranscode = performance.now() - transcodeStart;
+
   onProgress({
     step: 'complete',
     progress: 100,
@@ -608,6 +647,11 @@ async function renderWithWebCodecs({
     videoUrl,
     blob: mp4Blob,
     filename: `tarteel_${chapter.id}_${verses[0].verse_number}-${verses[verses.length - 1].verse_number}.mp4`,
+    timings: {
+      engine: 'WebCodecs (Hardware-Accelerated)',
+      renderMs: tRender,
+      transcodeMs: tTranscode,
+    },
   };
 }
 
@@ -669,7 +713,15 @@ async function renderWithFFmpegFallback({
 
   const startTime = performance.now();
   let animationFrameId = null;
+  const FADE_DURATION = 0.35;
 
+  // Build verse lookup map by verse_number
+  const verseByNumber = {};
+  for (const v of verses) {
+    verseByNumber[v.verse_number] = v;
+  }
+
+  console.time('⏱️ Phase 3: Realtime Frame Recording (MediaRecorder)');
   recorder.start(100);
   audioSource.start(0);
 
@@ -677,16 +729,31 @@ async function renderWithFFmpegFallback({
     function renderLoop() {
       const elapsed = (performance.now() - startTime) / 1000;
 
-      let activeVerse = verses[0];
+      // Find active timing by timestamp (not by index)
+      let activeTiming = verseTimings[verseTimings.length - 1];
       for (let i = 0; i < verseTimings.length; i++) {
-        if (elapsed >= verseTimings[i].startTime && elapsed <= verseTimings[i].endTime) {
-          activeVerse = verses[i] || verses[0];
+        if (elapsed <= verseTimings[i].endTime) {
+          activeTiming = verseTimings[i];
           break;
         }
       }
-      if (elapsed > totalDuration && verseTimings.length > 0) {
-        activeVerse = verses[verses.length - 1];
+
+      // Match verse object by verse_number (correct, not by index)
+      const activeVerse =
+        verseByNumber[activeTiming.verse_number] ||
+        verses.find((v) => v.verse_key === activeTiming.verse_key) ||
+        verses[0];
+
+      // Smooth fade alpha
+      const verseElapsed = elapsed - activeTiming.startTime;
+      const verseDuration = activeTiming.endTime - activeTiming.startTime;
+      let textAlpha = 1;
+      if (verseElapsed < FADE_DURATION) {
+        textAlpha = verseElapsed / FADE_DURATION;
+      } else if (verseDuration > FADE_DURATION * 2 && verseElapsed > verseDuration - FADE_DURATION) {
+        textAlpha = (verseDuration - verseElapsed) / FADE_DURATION;
       }
+      textAlpha = Math.max(0, Math.min(1, textAlpha));
 
       drawCanvasFrame({
         ctx,
@@ -697,6 +764,7 @@ async function renderWithFFmpegFallback({
         currentVerse: activeVerse,
         bgMediaElement,
         watermarkImg,
+        textAlpha,
       });
 
       const percent = Math.min(85, 45 + Math.round((elapsed / totalDuration) * 40));
@@ -720,7 +788,13 @@ async function renderWithFFmpegFallback({
     animationFrameId = requestAnimationFrame(renderLoop);
   });
 
+  console.timeEnd('⏱️ Phase 3: Realtime Frame Recording (MediaRecorder)');
+  const tRender = performance.now() - startTime;
+
   const recordedBlob = new Blob(recordedChunks, { type: chosenMime });
+
+  console.time('⏱️ Phase 4: FFmpeg.wasm Transcoding to MP4');
+  const transcodeStart = performance.now();
 
   onProgress({
     step: 'ffmpeg_transcode',
@@ -780,6 +854,9 @@ async function renderWithFFmpegFallback({
       await ffmpeg.deleteFile('output.mp4');
     } catch (e) {}
 
+    console.timeEnd('⏱️ Phase 4: FFmpeg.wasm Transcoding to MP4');
+    const tTranscode = performance.now() - transcodeStart;
+
     onProgress({
       step: 'complete',
       progress: 100,
@@ -790,9 +867,16 @@ async function renderWithFFmpegFallback({
       videoUrl,
       blob: mp4Blob,
       filename: `tarteel_${chapter.id}_${verses[0].verse_number}-${verses[verses.length - 1].verse_number}.mp4`,
+      timings: {
+        engine: 'FFmpeg.wasm (Software Fallback)',
+        renderMs: tRender,
+        transcodeMs: tTranscode,
+      },
     };
   } catch (ffmpegErr) {
     console.warn('FFmpeg conversion fallback to direct blob:', ffmpegErr);
+    console.timeEnd('⏱️ Phase 4: FFmpeg.wasm Transcoding to MP4');
+    const tTranscode = performance.now() - transcodeStart;
     const fallbackUrl = URL.createObjectURL(recordedBlob);
     const ext = chosenMime.includes('mp4') ? 'mp4' : 'webm';
 
@@ -806,6 +890,11 @@ async function renderWithFFmpegFallback({
       videoUrl: fallbackUrl,
       blob: recordedBlob,
       filename: `tarteel_${chapter.id}_${verses[0].verse_number}-${verses[verses.length - 1].verse_number}.${ext}`,
+      timings: {
+        engine: 'Direct Blob (FFmpeg Skipped)',
+        renderMs: tRender,
+        transcodeMs: tTranscode,
+      },
     };
   }
 }
@@ -820,6 +909,9 @@ export async function generateQuranVideo({
   audioList,
   onProgress,
 }) {
+  console.log('🚀 [START VIDEO GENERATION PROFILE]');
+  const tTotalStart = performance.now();
+
   onProgress({
     step: 'init',
     progress: 5,
@@ -827,6 +919,8 @@ export async function generateQuranVideo({
   });
 
   // Step 1: Concatenate audio files and compute verse timings (uses memory cache)
+  console.time('⏱️ Phase 1: Audio Fetch & Concatenation');
+  const tAudioStart = performance.now();
   onProgress({
     step: 'audio',
     progress: 15,
@@ -837,6 +931,8 @@ export async function generateQuranVideo({
     audioList,
     onProgress
   );
+  console.timeEnd('⏱️ Phase 1: Audio Fetch & Concatenation');
+  const tAudio = performance.now() - tAudioStart;
 
   onProgress({
     step: 'audio_done',
@@ -852,6 +948,9 @@ export async function generateQuranVideo({
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext('2d');
+
+  console.time('⏱️ Phase 2: Assets Preload (Background, Watermark, Fonts)');
+  const tAssetsStart = performance.now();
 
   // Load background using asset cache
   let bgMediaElement = null;
@@ -874,6 +973,10 @@ export async function generateQuranVideo({
   if (config.showWatermark !== false) {
     watermarkImg = await getPreloadedWatermark();
   }
+  console.timeEnd('⏱️ Phase 2: Assets Preload (Background, Watermark, Fonts)');
+  const tAssets = performance.now() - tAssetsStart;
+
+  let result = null;
 
   // Check if WebCodecs & mp4-muxer are supported for ultra-fast hardware acceleration
   // Note: static image/gradient backgrounds can be rendered offline at 100+ fps!
@@ -886,7 +989,7 @@ export async function generateQuranVideo({
 
   if (isWebCodecsSupported) {
     try {
-      return await renderWithWebCodecs({
+      result = await renderWithWebCodecs({
         width,
         height,
         fps: 30,
@@ -905,21 +1008,36 @@ export async function generateQuranVideo({
     }
   }
 
-  // Fallback to real-time MediaRecorder + FFmpeg.wasm
-  return await renderWithFFmpegFallback({
-    width,
-    height,
-    canvas,
-    ctx,
-    config,
-    chapter,
-    verses,
-    combinedBuffer,
-    totalDuration,
-    verseTimings,
-    audioCtx,
-    bgMediaElement,
-    watermarkImg,
-    onProgress,
+  if (!result) {
+    // Fallback to real-time MediaRecorder + FFmpeg.wasm
+    result = await renderWithFFmpegFallback({
+      width,
+      height,
+      canvas,
+      ctx,
+      config,
+      chapter,
+      verses,
+      combinedBuffer,
+      totalDuration,
+      verseTimings,
+      audioCtx,
+      bgMediaElement,
+      watermarkImg,
+      onProgress,
+    });
+  }
+
+  const tTotal = performance.now() - tTotalStart;
+  console.log('🏁 [FINISHED VIDEO GENERATION PROFILE]');
+  console.table({
+    'المرحلة 1: جلب وفك الصوت (Audio)': `${(tAudio / 1000).toFixed(2)} ثانية (${((tAudio / tTotal) * 100).toFixed(1)}%)`,
+    'المرحلة 2: تجهيز الأصول (Assets)': `${(tAssets / 1000).toFixed(2)} ثانية (${((tAssets / tTotal) * 100).toFixed(1)}%)`,
+    'المرحلة 3: رسم الإطارات (Frames)': `${((result.timings?.renderMs || 0) / 1000).toFixed(2)} ثانية (${(((result.timings?.renderMs || 0) / tTotal) * 100).toFixed(1)}%)`,
+    'المرحلة 4: الترميز النهائي (Transcode)': `${((result.timings?.transcodeMs || 0) / 1000).toFixed(2)} ثانية (${(((result.timings?.transcodeMs || 0) / tTotal) * 100).toFixed(1)}%)`,
+    'الإجمالي الكلي (Total)': `${(tTotal / 1000).toFixed(2)} ثانية`,
+    'المحرك المنفذ (Engine)': result.timings?.engine || 'Unknown',
   });
+
+  return result;
 }

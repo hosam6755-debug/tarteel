@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="favBg" cx="50%" cy="40%" r="65%">
+      <stop offset="0%" stop-color="#14b8a6" />
+      <stop offset="50%" stop-color="#0d9488" />
+      <stop offset="100%" stop-color="#042f2e" />
+    </radialGradient>
+    <linearGradient id="favGold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fff4d0" />
+      <stop offset="40%" stop-color="#fcd34d" />
+      <stop offset="80%" stop-color="#d97706" />
+    </linearGradient>
+    <filter id="favGlow">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000" flood-opacity="0.5"/>
+    </filter>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#favBg)" stroke="url(#favGold)" stroke-width="8" />
+  <rect x="44" y="44" width="424" height="424" rx="88" fill="none" stroke="url(#favGold)" stroke-width="2" opacity="0.6" stroke-dasharray="6,4" />
+  <!-- Central Calligraphy "ترتيل" -->
+  <g filter="url(#favGlow)">
+    <text x="256" y="315" font-family="'Amiri', 'Amiri Quran', serif" font-size="140" font-weight="bold" fill="url(#favGold)" text-anchor="middle">
+      ترتيل
+    </text>
+    <circle cx="256" cy="148" r="8" fill="url(#favGold)" />
+  </g>
+</svg>

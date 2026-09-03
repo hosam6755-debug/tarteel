@@ -1,6 +1,13 @@
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { toBlobURL, fetchFile } from '@ffmpeg/util';
+import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import { concatenateVerseAudios, audioBufferToWav } from './audioHelper';
+import {
+  getCachedImage,
+  getCachedVideo,
+  getPreloadedWatermark,
+  ensureFontsReady,
+} from './assetCache';
 
 let ffmpegInstance = null;
 let isFFmpegLoading = false;
@@ -388,98 +395,244 @@ export function drawCanvasFrame({
 }
 
 /**
- * Generate full Quran video in browser using Canvas + WebAudio + MediaRecorder + FFmpeg.wasm
+ * Ultra-fast Hardware-Accelerated Offline Rendering with WebCodecs & mp4-muxer
  */
-export async function generateQuranVideo({
+async function renderWithWebCodecs({
+  width,
+  height,
+  fps = 30,
   config,
   chapter,
   verses,
-  audioList,
+  combinedBuffer,
+  totalDuration,
+  verseTimings,
+  bgMediaElement,
+  watermarkImg,
   onProgress,
 }) {
   onProgress({
-    step: 'init',
-    progress: 5,
-    message: 'جاري تهيئة بيئة المعالجة والذكاء القرآني...',
+    step: 'muxer_setup',
+    progress: 35,
+    message: 'جاري تهيئة مسرّع العتاد (WebCodecs) والترميز المباشر لـ MP4...',
   });
 
-  // Step 1: Concatenate audio files and compute verse timings
-  onProgress({
-    step: 'audio',
-    progress: 15,
-    message: 'جاري دمج تلاوة الآيات بصوت القارئ المختار...',
+  const audioSampleRate = combinedBuffer.sampleRate || 44100;
+  const audioChannels = combinedBuffer.numberOfChannels || 2;
+
+  // 1. Configure Muxer
+  const muxer = new Muxer({
+    target: new ArrayBufferTarget(),
+    video: {
+      codec: 'avc',
+      width,
+      height,
+    },
+    audio: {
+      codec: 'aac',
+      numberOfChannels: audioChannels,
+      sampleRate: audioSampleRate,
+    },
+    fastStart: 'in-memory',
   });
 
-  const { combinedBuffer, totalDuration, verseTimings, audioCtx } = await concatenateVerseAudios(
-    audioList,
-    onProgress
-  );
+  // 2. Select compatible H.264 profile for VideoEncoder
+  const candidateCodecs = ['avc1.4d002a', 'avc1.640028', 'avc1.42001f'];
+  let chosenVideoCodec = null;
+  for (const c of candidateCodecs) {
+    const isSupp = await VideoEncoder.isConfigSupported({
+      codec: c,
+      width,
+      height,
+      bitrate: 5_000_000,
+      framerate: fps,
+    });
+    if (isSupp.supported) {
+      chosenVideoCodec = c;
+      break;
+    }
+  }
 
-  onProgress({
-    step: 'audio_done',
-    progress: 40,
-    message: `تم دمج التلاوة بنجاح (المدة الإجمالية: ${Math.ceil(totalDuration)} ثانية)`,
+  if (!chosenVideoCodec) {
+    throw new Error('لم يتم العثور على ترميز H.264 مدعوم في كرت الشاشة على هذا المتصفح.');
+  }
+
+  const videoEncoder = new VideoEncoder({
+    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+    error: (e) => console.error('VideoEncoder error:', e),
   });
 
-  // Step 2: Set up Canvas for rendering (guaranteed even pixel dimensions for H.264/yuv420p)
-  const width = Math.floor((config.aspectRatio === '9:16' ? 1080 : 1920) / 2) * 2;
-  const height = Math.floor((config.aspectRatio === '9:16' ? 1920 : 1080) / 2) * 2;
+  videoEncoder.configure({
+    codec: chosenVideoCodec,
+    width,
+    height,
+    bitrate: 5_000_000,
+    framerate: fps,
+  });
 
+  // 3. Configure AudioEncoder for AAC
+  const isAudioSupported = await AudioEncoder.isConfigSupported({
+    codec: 'mp4a.40.2',
+    sampleRate: audioSampleRate,
+    numberOfChannels: audioChannels,
+    bitrate: 192_000,
+  });
+
+  if (!isAudioSupported.supported) {
+    throw new Error('ترميز الصوت AAC غير مدعوم بواسطة WebCodecs على هذا المتصفح.');
+  }
+
+  const audioEncoder = new AudioEncoder({
+    output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
+    error: (e) => console.error('AudioEncoder error:', e),
+  });
+
+  audioEncoder.configure({
+    codec: 'mp4a.40.2',
+    sampleRate: audioSampleRate,
+    numberOfChannels: audioChannels,
+    bitrate: 192_000,
+  });
+
+  // 4. Encode audio in chunks of 2048 frames
+  const chunkSize = 2048;
+  const totalAudioSamples = combinedBuffer.length;
+  let audioOffset = 0;
+
+  while (audioOffset < totalAudioSamples) {
+    const currentChunkSize = Math.min(chunkSize, totalAudioSamples - audioOffset);
+    const planarData = new Float32Array(currentChunkSize * audioChannels);
+
+    for (let ch = 0; ch < audioChannels; ch++) {
+      const chData = combinedBuffer.getChannelData(ch);
+      const sub = chData.subarray(audioOffset, audioOffset + currentChunkSize);
+      planarData.set(sub, ch * currentChunkSize);
+    }
+
+    const timestampMicros = Math.round((audioOffset / audioSampleRate) * 1_000_000);
+    const audioData = new AudioData({
+      format: 'f32-planar',
+      sampleRate: audioSampleRate,
+      numberOfFrames: currentChunkSize,
+      numberOfChannels: audioChannels,
+      timestamp: timestampMicros,
+      data: planarData,
+    });
+
+    audioEncoder.encode(audioData);
+    audioData.close();
+    audioOffset += currentChunkSize;
+  }
+
+  // 5. Offline Frame-by-Frame Rendering on Canvas (Up to 5x-10x faster than real-time)
+  const totalFrames = Math.max(1, Math.ceil(totalDuration * fps));
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext('2d');
 
-  // Load background image or video element if applicable
-  let bgMediaElement = null;
-  if (config.background?.type === 'image') {
-    onProgress({
-      step: 'bg_load',
-      progress: 45,
-      message: 'جاري تحميل وتجهيز خلفية الفيديو عالية الدقة...',
+  const renderStart = performance.now();
+
+  for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
+    const timestampSec = frameIndex / fps;
+
+    // Find active verse
+    let activeVerse = verses[0];
+    for (let i = 0; i < verseTimings.length; i++) {
+      if (timestampSec >= verseTimings[i].startTime && timestampSec <= verseTimings[i].endTime) {
+        activeVerse = verses[i] || verses[0];
+        break;
+      }
+    }
+    if (timestampSec > totalDuration && verseTimings.length > 0) {
+      activeVerse = verses[verses.length - 1];
+    }
+
+    // Draw frame onto canvas
+    drawCanvasFrame({
+      ctx,
+      width,
+      height,
+      config,
+      chapter,
+      currentVerse: activeVerse,
+      bgMediaElement,
+      watermarkImg,
     });
-    bgMediaElement = await new Promise((resolve, reject) => {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      img.onload = () => resolve(img);
-      img.onerror = () => resolve(null); // Continue gracefully
-      img.src = config.background.url;
-    });
-  } else if (config.background?.type === 'video') {
-    bgMediaElement = await new Promise((resolve) => {
-      const video = document.createElement('video');
-      video.crossOrigin = 'anonymous';
-      video.src = config.background.url;
-      video.muted = true;
-      video.loop = true;
-      video.playsInline = true;
-      video.onloadeddata = () => {
-        video.play().catch(() => {});
-        resolve(video);
-      };
-      video.onerror = () => resolve(null);
-    });
+
+    // Pass frame to GPU Hardware VideoEncoder
+    const timestampMicros = Math.round(timestampSec * 1_000_000);
+    const videoFrame = new VideoFrame(canvas, { timestamp: timestampMicros });
+    videoEncoder.encode(videoFrame, { keyFrame: frameIndex % 60 === 0 });
+    videoFrame.close();
+
+    // Yield control periodically to avoid UI blocking and provide precise progress
+    if (frameIndex % 12 === 0 || frameIndex === totalFrames - 1) {
+      const elapsed = (performance.now() - renderStart) / 1000;
+      const currentFps = Math.round((frameIndex + 1) / Math.max(0.1, elapsed));
+      const percent = Math.min(94, 38 + Math.round((frameIndex / totalFrames) * 56));
+
+      onProgress({
+        step: 'encoding_frames',
+        progress: percent,
+        message: `جاري الرسم والترميز العتادي: إطار ${frameIndex + 1} من ${totalFrames} (${currentFps} إطار/ث)...`,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
   }
 
-  // Ensure Quranic fonts are loaded
-  await document.fonts.ready;
+  // 6. Finalize Encoders and Multiplex to MP4
+  onProgress({
+    step: 'finalizing',
+    progress: 96,
+    message: 'جاري تجميع ملف MP4 النهائي وترتيب مسارات الفيديو والصوت...',
+  });
 
-  // Preload Watermark Logo Image
-  let watermarkImg = null;
-  if (config.showWatermark !== false) {
-    watermarkImg = await new Promise((resolve) => {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      img.onload = () => resolve(img);
-      img.onerror = () => resolve(null);
-      img.src = '/tarteel-logo.svg';
-    });
-  }
+  await videoEncoder.flush();
+  await audioEncoder.flush();
+  videoEncoder.close();
+  audioEncoder.close();
 
-  // Step 3: Stream Recording Setup
+  muxer.finalize();
+  const buffer = muxer.target.buffer;
+  const mp4Blob = new Blob([buffer], { type: 'video/mp4' });
+  const videoUrl = URL.createObjectURL(mp4Blob);
+
+  onProgress({
+    step: 'complete',
+    progress: 100,
+    message: 'تم توليد الفيديو بنجاح فائق السرعة! جاهز للتحميل والمشاركة.',
+  });
+
+  return {
+    videoUrl,
+    blob: mp4Blob,
+    filename: `tarteel_${chapter.id}_${verses[0].verse_number}-${verses[verses.length - 1].verse_number}.mp4`,
+  };
+}
+
+/**
+ * Fallback Engine: Real-time MediaRecorder + FFmpeg.wasm Transcoding
+ */
+async function renderWithFFmpegFallback({
+  width,
+  height,
+  canvas,
+  ctx,
+  config,
+  chapter,
+  verses,
+  combinedBuffer,
+  totalDuration,
+  verseTimings,
+  audioCtx,
+  bgMediaElement,
+  watermarkImg,
+  onProgress,
+}) {
   onProgress({
     step: 'recording',
-    progress: 50,
+    progress: 45,
     message: 'جاري تسجيل ورسم إطارات الفيديو عالية الدقة المتزامنة مع الصوت...',
   });
 
@@ -496,7 +649,6 @@ export async function generateQuranVideo({
     ...audioDestination.stream.getAudioTracks(),
   ]);
 
-  // Determine supported mimeType
   const mimeTypes = [
     'video/webm;codecs=vp9,opus',
     'video/webm;codecs=vp8,opus',
@@ -507,7 +659,7 @@ export async function generateQuranVideo({
 
   const recorder = new MediaRecorder(combinedStream, {
     mimeType: chosenMime,
-    videoBitsPerSecond: 6000000, // 6 Mbps for pristine 1080p quality
+    videoBitsPerSecond: 6000000,
   });
 
   const recordedChunks = [];
@@ -515,7 +667,6 @@ export async function generateQuranVideo({
     if (e.data && e.data.size > 0) recordedChunks.push(e.data);
   };
 
-  // Start animation rendering loop & recording
   const startTime = performance.now();
   let animationFrameId = null;
 
@@ -526,7 +677,6 @@ export async function generateQuranVideo({
     function renderLoop() {
       const elapsed = (performance.now() - startTime) / 1000;
 
-      // Determine active verse according to elapsed audio time
       let activeVerse = verses[0];
       for (let i = 0; i < verseTimings.length; i++) {
         if (elapsed >= verseTimings[i].startTime && elapsed <= verseTimings[i].endTime) {
@@ -538,7 +688,6 @@ export async function generateQuranVideo({
         activeVerse = verses[verses.length - 1];
       }
 
-      // Draw current frame
       drawCanvasFrame({
         ctx,
         width,
@@ -550,12 +699,11 @@ export async function generateQuranVideo({
         watermarkImg,
       });
 
-      // Update progress
-      const percent = Math.min(85, 50 + Math.round((elapsed / totalDuration) * 35));
+      const percent = Math.min(85, 45 + Math.round((elapsed / totalDuration) * 40));
       onProgress({
         step: 'recording_progress',
         progress: percent,
-        message: `جاري الرسم والتسجيل: ${Math.round(elapsed)}s / ${Math.ceil(totalDuration)}s...`,
+        message: `جاري التسجيل: ${Math.round(elapsed)} ثانية / ${Math.ceil(totalDuration)} ثانية...`,
       });
 
       if (elapsed < totalDuration + 0.5) {
@@ -574,7 +722,6 @@ export async function generateQuranVideo({
 
   const recordedBlob = new Blob(recordedChunks, { type: chosenMime });
 
-  // Step 4: Transcode to MP4 using ffmpeg.wasm for universal compatibility
   onProgress({
     step: 'ffmpeg_transcode',
     progress: 88,
@@ -582,10 +729,7 @@ export async function generateQuranVideo({
   });
 
   try {
-    const ffmpeg = await getFFmpeg((logMsg) => {
-      // console.log('[ffmpeg]:', logMsg);
-    });
-
+    const ffmpeg = await getFFmpeg((logMsg) => {});
     const inputData = await fetchFile(recordedBlob);
     await ffmpeg.writeFile('input.webm', inputData);
 
@@ -595,7 +739,6 @@ export async function generateQuranVideo({
       message: 'جاري ضغط وترميز H.264 و AAC داخل المتصفح...',
     });
 
-    // Run FFmpeg: Encode strictly with H.264 (libx264) + AAC with CFR 30fps, even dimensions, and faststart
     await ffmpeg.exec([
       '-i',
       'input.webm',
@@ -632,7 +775,6 @@ export async function generateQuranVideo({
     const mp4Blob = new Blob([outputData.buffer], { type: 'video/mp4' });
     const videoUrl = URL.createObjectURL(mp4Blob);
 
-    // Cleanup virtual files
     try {
       await ffmpeg.deleteFile('input.webm');
       await ffmpeg.deleteFile('output.mp4');
@@ -647,11 +789,10 @@ export async function generateQuranVideo({
     return {
       videoUrl,
       blob: mp4Blob,
-      filename: `quran_${chapter.id}_${verses[0].verse_number}-${verses[verses.length - 1].verse_number}.mp4`,
+      filename: `tarteel_${chapter.id}_${verses[0].verse_number}-${verses[verses.length - 1].verse_number}.mp4`,
     };
   } catch (ffmpegErr) {
-    console.warn('FFmpeg conversion fallback to WebM/direct MP4:', ffmpegErr);
-    // Graceful fallback: return the high quality recorded blob directly
+    console.warn('FFmpeg conversion fallback to direct blob:', ffmpegErr);
     const fallbackUrl = URL.createObjectURL(recordedBlob);
     const ext = chosenMime.includes('mp4') ? 'mp4' : 'webm';
 
@@ -664,7 +805,121 @@ export async function generateQuranVideo({
     return {
       videoUrl: fallbackUrl,
       blob: recordedBlob,
-      filename: `quran_${chapter.id}_${verses[0].verse_number}-${verses[verses.length - 1].verse_number}.${ext}`,
+      filename: `tarteel_${chapter.id}_${verses[0].verse_number}-${verses[verses.length - 1].verse_number}.${ext}`,
     };
   }
+}
+
+/**
+ * Main Entry: Generate Quran Video with Automatic Hardware Acceleration & Caching
+ */
+export async function generateQuranVideo({
+  config,
+  chapter,
+  verses,
+  audioList,
+  onProgress,
+}) {
+  onProgress({
+    step: 'init',
+    progress: 5,
+    message: 'جاري تهيئة بيئة المعالجة والذكاء القرآني...',
+  });
+
+  // Step 1: Concatenate audio files and compute verse timings (uses memory cache)
+  onProgress({
+    step: 'audio',
+    progress: 15,
+    message: 'جاري استرجاع تلاوة الآيات العطرة ومعالجتها...',
+  });
+
+  const { combinedBuffer, totalDuration, verseTimings, audioCtx } = await concatenateVerseAudios(
+    audioList,
+    onProgress
+  );
+
+  onProgress({
+    step: 'audio_done',
+    progress: 25,
+    message: `تم تجهيز التلاوة بنجاح (المدة الإجمالية: ${Math.ceil(totalDuration)} ثانية)`,
+  });
+
+  // Step 2: Set up Canvas for rendering (guaranteed even pixel dimensions)
+  const width = Math.floor((config.aspectRatio === '9:16' ? 1080 : 1920) / 2) * 2;
+  const height = Math.floor((config.aspectRatio === '9:16' ? 1920 : 1080) / 2) * 2;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+
+  // Load background using asset cache
+  let bgMediaElement = null;
+  if (config.background?.type === 'image') {
+    onProgress({
+      step: 'bg_load',
+      progress: 30,
+      message: 'جاري استرجاع خلفية الفيديو عالية الدقة من الذاكرة المؤقتة...',
+    });
+    bgMediaElement = await getCachedImage(config.background.url);
+  } else if (config.background?.type === 'video') {
+    bgMediaElement = await getCachedVideo(config.background.url);
+  }
+
+  // Ensure Quranic fonts are loaded
+  await ensureFontsReady();
+
+  // Preload Watermark Logo Image from cache
+  let watermarkImg = null;
+  if (config.showWatermark !== false) {
+    watermarkImg = await getPreloadedWatermark();
+  }
+
+  // Check if WebCodecs & mp4-muxer are supported for ultra-fast hardware acceleration
+  // Note: static image/gradient backgrounds can be rendered offline at 100+ fps!
+  const isWebCodecsSupported =
+    typeof VideoEncoder !== 'undefined' &&
+    typeof AudioEncoder !== 'undefined' &&
+    typeof VideoFrame !== 'undefined' &&
+    typeof AudioData !== 'undefined' &&
+    config.background?.type !== 'video';
+
+  if (isWebCodecsSupported) {
+    try {
+      return await renderWithWebCodecs({
+        width,
+        height,
+        fps: 30,
+        config,
+        chapter,
+        verses,
+        combinedBuffer,
+        totalDuration,
+        verseTimings,
+        bgMediaElement,
+        watermarkImg,
+        onProgress,
+      });
+    } catch (err) {
+      console.warn('تعذر استخدام WebCodecs، جاري التحويل التلقائي لمحرك FFmpeg الاحتياطي:', err);
+    }
+  }
+
+  // Fallback to real-time MediaRecorder + FFmpeg.wasm
+  return await renderWithFFmpegFallback({
+    width,
+    height,
+    canvas,
+    ctx,
+    config,
+    chapter,
+    verses,
+    combinedBuffer,
+    totalDuration,
+    verseTimings,
+    audioCtx,
+    bgMediaElement,
+    watermarkImg,
+    onProgress,
+  });
 }

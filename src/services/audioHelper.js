@@ -1,12 +1,10 @@
-// Helper for downloading, decoding, concatenating audio, and exporting WAV format
+import { getCachedAudioBuffer, getCachedArrayBuffer } from './assetCache';
 
 /**
  * Fetch an audio file from URL and return ArrayBuffer
  */
 export async function fetchAudioBuffer(url) {
-  const response = await fetch(url, { mode: 'cors' });
-  if (!response.ok) throw new Error(`فشل تحميل الصوت: ${response.statusText}`);
-  return await response.arrayBuffer();
+  return await getCachedArrayBuffer(url);
 }
 
 /**
@@ -30,12 +28,11 @@ export async function concatenateVerseAudios(audioList, onProgress) {
       onProgress({
         step: 'audio_fetch',
         progress: 25,
-        message: 'جاري تحميل ملف التلاوة العطرة من الخادم...',
+        message: 'جاري استرجاع ملف التلاوة العطرة ومعالجته...',
       });
     }
 
-    const arrayBuffer = await fetchAudioBuffer(chapterUrl);
-    const decodedFullBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+    const decodedFullBuffer = await getCachedAudioBuffer(chapterUrl, audioCtx);
 
     const startCut = Math.max(0, audioList[0].startTime);
     const lastItem = audioList[audioList.length - 1];
@@ -85,39 +82,38 @@ export async function concatenateVerseAudios(audioList, onProgress) {
   }
 
   // 2. Handle Individual By-Ayah Audio Files (e.g. Mishari, AbdulBaset, Minshawi)
-  const decodedBuffers = [];
+  if (onProgress) {
+    onProgress({
+      step: 'audio_fetch',
+      progress: 30,
+      message: 'جاري استرجاع ومعالجة أصوات الآيات بالتوازي...',
+    });
+  }
+
+  const decodedBuffers = await Promise.all(
+    audioList.map(async (item) => {
+      return await getCachedAudioBuffer(item.audio_url, audioCtx);
+    })
+  );
+
   const verseTimings = [];
   let cumulativeTime = 0;
 
   for (let i = 0; i < audioList.length; i++) {
     const item = audioList[i];
-    if (onProgress) {
-      onProgress({
-        step: 'audio_fetch',
-        progress: Math.round(((i + 1) / audioList.length) * 45),
-        message: `جاري تحميل ومعالجة صوت الآية ${item.verse_number}...`,
-      });
-    }
+    const audioBuffer = decodedBuffers[i];
+    const duration = audioBuffer.duration;
 
-    try {
-      const arrayBuffer = await fetchAudioBuffer(item.audio_url);
-      const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-      decodedBuffers.push(audioBuffer);
+    verseTimings.push({
+      verse_number: item.verse_number,
+      verse_key: item.verse_key,
+      startTime: cumulativeTime,
+      endTime: cumulativeTime + duration,
+      duration,
+      bufferIndex: i,
+    });
 
-      const duration = audioBuffer.duration;
-      verseTimings.push({
-        verse_number: item.verse_number,
-        verse_key: item.verse_key,
-        startTime: cumulativeTime,
-        endTime: cumulativeTime + duration,
-        duration,
-        bufferIndex: i,
-      });
-
-      cumulativeTime += duration;
-    } catch (err) {
-      console.error(`Error processing audio for verse ${item.verse_number}:`, err);
-    }
+    cumulativeTime += duration;
   }
 
   if (decodedBuffers.length === 0) {

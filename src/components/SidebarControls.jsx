@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   BookOpen,
   Mic,
@@ -37,6 +37,62 @@ export default function SidebarControls({
 
   const currentChapter = chapters.find((c) => c.id === Number(config.chapterId)) || chapters[0];
   const maxVerses = currentChapter ? currentChapter.verses_count : 7;
+
+  // Local string state for smooth typing without premature clamping/reset
+  const [fromInput, setFromInput] = useState(String(config.fromAyah));
+  const [toInput, setToInput] = useState(String(config.toAyah));
+
+  // Keep local inputs in sync when config values change from outside
+  useEffect(() => {
+    setFromInput(String(config.fromAyah));
+  }, [config.fromAyah]);
+
+  useEffect(() => {
+    setToInput(String(config.toAyah));
+  }, [config.toAyah]);
+
+  // Commit and validate onBlur / Enter
+  const commitFromAyah = () => {
+    let val = parseInt(fromInput, 10);
+    if (isNaN(val) || val < 1) {
+      val = 1;
+    }
+    if (val > maxVerses) {
+      val = maxVerses;
+    }
+    let newTo = config.toAyah;
+    if (val > newTo) {
+      newTo = val;
+    }
+    setFromInput(String(val));
+    setToInput(String(newTo));
+    setConfig((prev) => ({
+      ...prev,
+      fromAyah: val,
+      toAyah: newTo,
+    }));
+  };
+
+  const commitToAyah = () => {
+    let val = parseInt(toInput, 10);
+    if (isNaN(val) || val < 1) {
+      val = config.fromAyah;
+    }
+    if (val > maxVerses) {
+      val = maxVerses;
+    }
+    let newFrom = config.fromAyah;
+    if (val < newFrom) {
+      newFrom = val;
+    }
+    setFromInput(String(newFrom));
+    setToInput(String(val));
+    setConfig((prev) => ({
+      ...prev,
+      fromAyah: newFrom,
+      toAyah: val,
+    }));
+  };
 
   // Handle chapter change
   const handleChapterChange = (e) => {
@@ -164,12 +220,23 @@ export default function SidebarControls({
                   type="number"
                   className="text-input"
                   min="1"
-                  max={config.toAyah}
-                  value={config.fromAyah}
+                  max={maxVerses}
+                  value={fromInput}
                   onChange={(e) => {
-                    const val = Math.max(1, Math.min(Number(e.target.value), config.toAyah));
-                    setConfig((prev) => ({ ...prev, fromAyah: val }));
+                    const raw = e.target.value;
+                    if (raw === '' || /^\d+$/.test(raw)) {
+                      setFromInput(raw);
+                    }
                   }}
+                  onBlur={commitFromAyah}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      commitFromAyah();
+                      e.target.blur();
+                    }
+                  }}
+                  placeholder="1"
+                  autoComplete="off"
                 />
               </div>
 
@@ -178,13 +245,24 @@ export default function SidebarControls({
                 <input
                   type="number"
                   className="text-input"
-                  min={config.fromAyah}
+                  min="1"
                   max={maxVerses}
-                  value={config.toAyah}
+                  value={toInput}
                   onChange={(e) => {
-                    const val = Math.min(maxVerses, Math.max(config.fromAyah, Number(e.target.value)));
-                    setConfig((prev) => ({ ...prev, toAyah: val }));
+                    const raw = e.target.value;
+                    if (raw === '' || /^\d+$/.test(raw)) {
+                      setToInput(raw);
+                    }
                   }}
+                  onBlur={commitToAyah}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      commitToAyah();
+                      e.target.blur();
+                    }
+                  }}
+                  placeholder={String(maxVerses)}
+                  autoComplete="off"
                 />
               </div>
             </div>

@@ -14,10 +14,12 @@
     "@ffmpeg/ffmpeg": "^0.12.15",
     "@ffmpeg/util": "^0.12.2",
     "canvas-confetti": "^1.9.4",
+    "firebase": "^12.18.0",
     "lucide-react": "^1.39.0",
     "mp4-muxer": "^5.2.2",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "react-router-dom": "^7.18.3"
   },
   "devDependencies": {
     "@types/react": "^19.2.18",

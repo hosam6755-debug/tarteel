@@ -345,7 +345,13 @@ export default function LivePreview({
         {config.showWatermark !== false && (
           <div
             className={`stage-watermark-badge pos-${config.watermarkPosition || 'bottom-right'}`}
-            style={{ opacity: config.watermarkOpacity || 0.75 }}
+            style={{ 
+              opacity: config.watermarkOpacity || 0.75,
+              transform: `scale(${config.watermarkScale || 1.0})`,
+              transformOrigin: (config.watermarkPosition || 'bottom-right').includes('bottom') 
+                ? ((config.watermarkPosition || 'bottom-right').includes('right') ? 'bottom right' : 'bottom left')
+                : ((config.watermarkPosition || 'bottom-right').includes('right') ? 'top right' : 'top left')
+            }}
           >
             <img src="/tarteel-logo.svg" alt="ترتيل" className="watermark-logo-img" />
             <span className="watermark-brand-name">ترتيل</span>

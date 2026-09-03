@@ -247,8 +247,7 @@ export function drawCanvasFrame({
     ctx.globalAlpha = textAlpha;
     // Scale font size proportionally for high-res output
     const scaleFactor = width / 400;
-    const arabicFontSize = Math.round((config.quranFontSize || 30) * scaleFactor);
-    ctx.font = `normal ${arabicFontSize}px ${config.quranFont || 'Amiri Quran'}, 'Amiri', serif`;
+    let arabicFontSize = Math.round((config.quranFontSize || 30) * scaleFactor);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.direction = 'rtl';
@@ -264,10 +263,26 @@ export function drawCanvasFrame({
 
     const fullVerseText = `${currentVerse.text_uthmani} ۝${toArabicDigits(currentVerse.verse_number)}`;
     const maxTextWidth = width * 0.82;
-    const lines = wrapText(ctx, fullVerseText, maxTextWidth);
+    
+    // Auto-shrink font size if text block is too tall
+    let lines = [];
+    let totalBlockHeight = 0;
+    let lineHeight = 0;
+    const maxBlockHeight = height * (config.showTranslation ? 0.6 : 0.75);
+    const minFontSize = 14 * scaleFactor;
 
-    const lineHeight = arabicFontSize * 2.1;
-    const totalBlockHeight = lines.length * lineHeight;
+    do {
+      ctx.font = `normal ${arabicFontSize}px ${config.quranFont || 'Amiri Quran'}, 'Amiri', serif`;
+      lines = wrapText(ctx, fullVerseText, maxTextWidth);
+      lineHeight = arabicFontSize * 2.1;
+      totalBlockHeight = lines.length * lineHeight;
+      if (totalBlockHeight > maxBlockHeight && arabicFontSize > minFontSize) {
+        arabicFontSize -= 2 * scaleFactor;
+      } else {
+        break;
+      }
+    } while (arabicFontSize > minFontSize);
+
     const startY = (height - totalBlockHeight) / 2 + (config.showTranslation ? -height * 0.05 : 0);
 
     lines.forEach((line, idx) => {
@@ -326,7 +341,8 @@ export function drawCanvasFrame({
     ctx.globalAlpha = opacity;
 
     const watermarkText = 'ترتيل';
-    const wmFontSize = Math.max(22, Math.round(width * 0.024));
+    const scale = config.watermarkScale || 1;
+    const wmFontSize = Math.max(22, Math.round(width * 0.024)) * scale;
     ctx.font = `800 ${wmFontSize}px 'Cairo', sans-serif`;
     ctx.textBaseline = 'middle';
     ctx.direction = 'rtl';

@@ -45,6 +45,7 @@ export default function App() {
     showWatermark: true,
     watermarkPosition: 'bottom-right', // 'bottom-right' | 'bottom-left' | 'top-right' | 'top-left'
     watermarkOpacity: 0.75,
+    watermarkScale: 1.0,
   });
 
   // Playback & Active Ayah State

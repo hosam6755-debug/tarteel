@@ -757,6 +757,26 @@ export default function SidebarControls({
                     علامة مائية خفيفة وأنيقة تحفظ مصدر وحقوق الفيديو عند مشاركته على تيك توك وإنستغرام
                   </span>
                 </div>
+                <div className="slider-container">
+                  <div className="slider-header">
+                    <span>حجم العلامة المائية</span>
+                    <span className="slider-val">{Math.round((config.watermarkScale || 1.0) * 100)}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    className="custom-slider"
+                    min="0.5"
+                    max="2.0"
+                    step="0.1"
+                    value={config.watermarkScale || 1.0}
+                    onChange={(e) =>
+                      setConfig((prev) => ({ ...prev, watermarkScale: Number(e.target.value) }))
+                    }
+                  />
+                  <span className="form-label-desc">
+                    التحكم في حجم شعار واسم "ترتيل" على الفيديو
+                  </span>
+                </div>
               </>
             )}
           </div>

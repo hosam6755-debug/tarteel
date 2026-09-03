@@ -353,7 +353,7 @@ export default function LivePreview({
                 : ((config.watermarkPosition || 'bottom-right').includes('right') ? 'top right' : 'top left')
             }}
           >
-            <img src="/tarteel-logo.svg" alt="ترتيل" className="watermark-logo-img" />
+            <img src="/tarteel-logo.png" alt="ترتيل" className="watermark-logo-img" />
             <span className="watermark-brand-name">ترتيل</span>
           </div>
         )}

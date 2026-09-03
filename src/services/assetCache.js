@@ -96,7 +96,7 @@ export async function getPreloadedWatermark() {
   if (preloadedWatermark && preloadedWatermark.complete && preloadedWatermark.naturalWidth > 0) {
     return preloadedWatermark;
   }
-  preloadedWatermark = await getCachedImage('/tarteel-logo.svg');
+  preloadedWatermark = await getCachedImage('/tarteel-logo.png');
   return preloadedWatermark;
 }
 

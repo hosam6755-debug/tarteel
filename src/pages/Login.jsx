@@ -30,7 +30,7 @@ export default function Login() {
         await setDoc(doc(db, 'users', user.uid), {
           email: user.email,
           role: 'user', // Default role
-          daily_limit: 1, // Default limit
+          daily_limit: 2, // Default limit
           created_at: new Date().toISOString()
         });
       }
@@ -73,9 +73,9 @@ export default function Login() {
         <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1rem', color: '#e5b869' }}>
           <Sparkles size={40} />
         </div>
-        <h2 style={{ color: '#fff', marginBottom: '0.5rem', fontSize: '1.75rem' }}>ستوديو ترتيل</h2>
+        <h2 style={{ color: '#fff', marginBottom: '0.5rem', fontSize: '1.75rem' }}>ترتيل</h2>
         <p style={{ color: '#94a3b8', marginBottom: '2rem' }}>
-          {isLogin ? 'تسجيل الدخول لمتابعة التصميم' : 'أنشئ حساباً للبدء بتوليد الفيديوهات'}
+          {isLogin ? 'تسجيل الدخول للمتابعة' : 'أنشئ حساباً للبدء بتوليد الفيديوهات'}
         </p>
 
         {error && (

@@ -25,7 +25,7 @@ export default function App() {
             setUserData(userSnap.data());
           } else {
             // User just signed up, wait for the profile to be created or handle it
-            setUserData({ role: 'user', daily_limit: 1 });
+            setUserData({ role: 'user', daily_limit: 2 });
           }
         } catch (error) {
           console.error("Error fetching user role:", error);

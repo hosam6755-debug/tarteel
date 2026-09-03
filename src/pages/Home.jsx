@@ -148,7 +148,7 @@ export default function Home({ user, userData }) {
       );
       const querySnapshot = await getDocs(q);
       
-      const limit = userData?.daily_limit || 1;
+      const limit = userData?.daily_limit || 2;
       if (querySnapshot.size >= limit && userData?.role !== 'admin') {
         alert(`لقد استنفدت الحد اليومي المسموح لك (${limit} فيديو). يرجى المحاولة غداً.`);
         return;

@@ -1,0 +1,22 @@
+{
+  "name": "tarteel-cloud-functions",
+  "version": "1.0.0",
+  "description": "Serverless Quran video rendering engine powered by Firebase Gen 2 & FFmpeg",
+  "main": "index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "serve": "firebase emulators:start --only functions",
+    "shell": "firebase functions:shell",
+    "deploy": "firebase deploy --only functions"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^0.1.66",
+    "axios": "^1.7.9",
+    "ffmpeg-static": "^5.2.0",
+    "firebase-admin": "^13.1.0",
+    "firebase-functions": "^6.3.2"
+  },
+  "private": true
+}

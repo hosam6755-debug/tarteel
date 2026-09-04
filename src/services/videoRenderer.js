@@ -44,9 +44,25 @@ function wrapText(ctx, text, maxWidth) {
 }
 
 /**
- * Initialize FFmpeg instance
+ * Accurate mobile device detection to apply lightweight rendering constraints
+ */
+export function isMobileDevice() {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  const isTouchScreen = typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
+  const isMobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile|mobile|CriOS/i.test(ua);
+  const isSmallScreen = typeof window !== 'undefined' && window.innerWidth <= 800;
+  return isMobileUA || (isTouchScreen && isSmallScreen);
+}
+
+/**
+ * Initialize FFmpeg instance (Strictly disabled on mobile devices to prevent OOM)
  */
 export async function getFFmpeg(onLog) {
+  if (isMobileDevice()) {
+    throw new Error('تم تعطيل محرك ffmpeg.wasm على أجهزة الجوال لحماية المتصفح والاعتماد على العتاد المباشر.');
+  }
+
   if (ffmpegInstance && ffmpegInstance.loaded) {
     return ffmpegInstance;
   }
@@ -441,6 +457,9 @@ async function renderWithWebCodecs({
   const audioSampleRate = combinedBuffer.sampleRate || 44100;
   const audioChannels = combinedBuffer.numberOfChannels || 2;
 
+  const isMobile = isMobileDevice();
+  const targetBitrate = isMobile ? 2_000_000 : 5_000_000;
+
   // 1. Configure Muxer
   const muxer = new Muxer({
     target: new ArrayBufferTarget(),
@@ -461,17 +480,19 @@ async function renderWithWebCodecs({
   const candidateCodecs = ['avc1.4d002a', 'avc1.640028', 'avc1.42001f'];
   let chosenVideoCodec = null;
   for (const c of candidateCodecs) {
-    const isSupp = await VideoEncoder.isConfigSupported({
-      codec: c,
-      width,
-      height,
-      bitrate: 5_000_000,
-      framerate: fps,
-    });
-    if (isSupp.supported) {
-      chosenVideoCodec = c;
-      break;
-    }
+    try {
+      const isSupp = await VideoEncoder.isConfigSupported({
+        codec: c,
+        width,
+        height,
+        bitrate: targetBitrate,
+        framerate: fps,
+      });
+      if (isSupp && isSupp.supported) {
+        chosenVideoCodec = c;
+        break;
+      }
+    } catch (e) {}
   }
 
   if (!chosenVideoCodec) {
@@ -487,19 +508,29 @@ async function renderWithWebCodecs({
     codec: chosenVideoCodec,
     width,
     height,
-    bitrate: 5_000_000,
+    bitrate: targetBitrate,
     framerate: fps,
   });
 
   // 3. Configure AudioEncoder for AAC
-  const isAudioSupported = await AudioEncoder.isConfigSupported({
-    codec: 'mp4a.40.2',
-    sampleRate: audioSampleRate,
-    numberOfChannels: audioChannels,
-    bitrate: 192_000,
-  });
+  const candidateAudioBitrates = isMobile ? [128_000, 96_000] : [192_000, 128_000];
+  let chosenAudioBitrate = null;
+  for (const br of candidateAudioBitrates) {
+    try {
+      const isAudioSupported = await AudioEncoder.isConfigSupported({
+        codec: 'mp4a.40.2',
+        sampleRate: audioSampleRate,
+        numberOfChannels: audioChannels,
+        bitrate: br,
+      });
+      if (isAudioSupported && isAudioSupported.supported) {
+        chosenAudioBitrate = br;
+        break;
+      }
+    } catch (e) {}
+  }
 
-  if (!isAudioSupported.supported) {
+  if (!chosenAudioBitrate) {
     throw new Error('ترميز الصوت AAC غير مدعوم بواسطة WebCodecs على هذا المتصفح.');
   }
 
@@ -512,7 +543,7 @@ async function renderWithWebCodecs({
     codec: 'mp4a.40.2',
     sampleRate: audioSampleRate,
     numberOfChannels: audioChannels,
-    bitrate: 192_000,
+    bitrate: chosenAudioBitrate,
   });
 
   // 4. Encode audio in chunks of 2048 frames
@@ -609,11 +640,15 @@ async function renderWithWebCodecs({
     // Pass frame to GPU Hardware VideoEncoder
     const timestampMicros = Math.round(timestampSec * 1_000_000);
     const videoFrame = new VideoFrame(canvas, { timestamp: timestampMicros });
-    videoEncoder.encode(videoFrame, { keyFrame: frameIndex % 60 === 0 });
+    videoEncoder.encode(videoFrame, { keyFrame: frameIndex % (fps * 2) === 0 });
     videoFrame.close();
 
-    // Yield control frequently every 3 frames to avoid UI freezing on mobile devices
-    if (frameIndex % 3 === 0 || frameIndex === totalFrames - 1) {
+    // Immediate memory release: clear canvas backing buffer
+    ctx.clearRect(0, 0, width, height);
+
+    // Yield control: every 2 frames on mobile (4 on desktop) to allow garbage collection
+    const yieldFrequency = isMobile ? 2 : 4;
+    if (frameIndex % yieldFrequency === 0 || frameIndex === totalFrames - 1) {
       const elapsed = (performance.now() - renderStart) / 1000;
       const currentFps = Math.round((frameIndex + 1) / Math.max(0.1, elapsed));
       const percent = Math.min(94, 38 + Math.round((frameIndex / totalFrames) * 56));
@@ -621,7 +656,9 @@ async function renderWithWebCodecs({
       onProgress({
         step: 'encoding_frames',
         progress: percent,
-        message: `جاري الرسم والترميز العتادي: إطار ${frameIndex + 1} من ${totalFrames} (${currentFps} إطار/ث)...`,
+        message: isMobile
+          ? `معالجة خفيفة للجوال: إطار ${frameIndex + 1} من ${totalFrames} (${currentFps} إطار/ث)...`
+          : `جاري الرسم والترميز العتادي: إطار ${frameIndex + 1} من ${totalFrames} (${currentFps} إطار/ث)...`,
       });
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
@@ -679,6 +716,7 @@ async function renderWithFFmpegFallback({
   height,
   canvas,
   ctx,
+  fps = 30,
   config,
   chapter,
   verses,
@@ -690,10 +728,14 @@ async function renderWithFFmpegFallback({
   watermarkImg,
   onProgress,
 }) {
+  const isMobile = isMobileDevice();
+
   onProgress({
     step: 'recording',
     progress: 45,
-    message: 'جاري تسجيل ورسم إطارات الفيديو عالية الدقة المتزامنة مع الصوت...',
+    message: isMobile
+      ? 'جاري تسجيل ورسم إطارات الفيديو بالتسريع المباشر للجوال...'
+      : 'جاري تسجيل ورسم إطارات الفيديو عالية الدقة المتزامنة مع الصوت...',
   });
 
   // Setup WebAudio stream destination
@@ -703,7 +745,7 @@ async function renderWithFFmpegFallback({
   audioSource.connect(audioDestination);
 
   // Combine Canvas stream and WebAudio stream
-  const canvasStream = canvas.captureStream(30); // 30 FPS
+  const canvasStream = canvas.captureStream(fps);
   const combinedStream = new MediaStream([
     ...canvasStream.getVideoTracks(),
     ...audioDestination.stream.getAudioTracks(),
@@ -721,7 +763,7 @@ async function renderWithFFmpegFallback({
 
   const recorder = new MediaRecorder(combinedStream, {
     mimeType: chosenMime,
-    videoBitsPerSecond: 5000000,
+    videoBitsPerSecond: isMobile ? 2000000 : 5000000,
   });
 
   const recordedChunks = [];
@@ -811,21 +853,21 @@ async function renderWithFFmpegFallback({
 
   const recordedBlob = new Blob(recordedChunks, { type: chosenMime });
 
-  // If already native MP4, return immediately without running FFmpeg.wasm!
-  if (chosenMime.includes('mp4') || typeof SharedArrayBuffer === 'undefined') {
+  // If mobile, or already native MP4, or SharedArrayBuffer is unavailable: return immediately without running FFmpeg.wasm!
+  if (isMobile || chosenMime.includes('mp4') || typeof SharedArrayBuffer === 'undefined') {
     const videoUrl = URL.createObjectURL(recordedBlob);
     const ext = chosenMime.includes('mp4') ? 'mp4' : 'webm';
     onProgress({
       step: 'complete',
       progress: 100,
-      message: 'تم إنشاء الفيديو بنجاح! جاهز للمعاينة والتحميل.',
+      message: 'تم إنشاء وتصدير الفيديو بنجاح! جاهز للمعاينة والتحميل.',
     });
     return {
       videoUrl,
       blob: recordedBlob,
       filename: `tarteel_${chapter.id}_${verses[0].verse_number}-${verses[verses.length - 1].verse_number}.${ext}`,
       timings: {
-        engine: chosenMime.includes('mp4') ? 'Native MP4 Hardware Direct' : 'Direct MediaRecorder',
+        engine: isMobile ? 'Mobile Hardware Lightweight Direct (Zero OOM)' : (chosenMime.includes('mp4') ? 'Native MP4 Hardware Direct' : 'Direct MediaRecorder'),
         renderMs: tRender,
         transcodeMs: 0,
       },
@@ -979,11 +1021,36 @@ export async function generateQuranVideo({
     message: `تم تجهيز التلاوة بنجاح (المدة الإجمالية: ${Math.ceil(totalDuration)} ثانية)`,
   });
 
-  // Step 2: Set up Canvas for rendering (Adaptive resolution: 720p on mobile to eliminate freezes, 1080p on desktop)
-  const isMobile = typeof navigator !== 'undefined' && (/Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (typeof window !== 'undefined' && window.innerWidth < 768));
-  const targetBase = isMobile ? 720 : 1080;
-  const width = Math.floor((config.aspectRatio === '9:16' ? targetBase : Math.round(targetBase * 16 / 9)) / 2) * 2;
-  const height = Math.floor((config.aspectRatio === '9:16' ? Math.round(targetBase * 16 / 9) : targetBase) / 2) * 2;
+  // Step 2: Set up Canvas for rendering (Adaptive resolution: 540x960 & 24fps on mobile for zero-crash lightweight execution, 1080p on desktop)
+  const isMobile = isMobileDevice();
+  const fps = isMobile ? 24 : 30;
+
+  let width, height;
+  if (isMobile) {
+    // Ultra-lightweight dimensions for mobile: 540x960 (4x fewer pixels, avoids browser tab out-of-memory)
+    if (config.aspectRatio === '9:16') {
+      width = 540;
+      height = 960;
+    } else if (config.aspectRatio === '1:1') {
+      width = 640;
+      height = 640;
+    } else {
+      width = 960;
+      height = 540;
+    }
+  } else {
+    // Full HD for desktop
+    if (config.aspectRatio === '9:16') {
+      width = 1080;
+      height = 1920;
+    } else if (config.aspectRatio === '1:1') {
+      width = 1080;
+      height = 1080;
+    } else {
+      width = 1920;
+      height = 1080;
+    }
+  }
 
   const canvas = document.createElement('canvas');
   canvas.width = width;
@@ -1033,7 +1100,7 @@ export async function generateQuranVideo({
       result = await renderWithWebCodecs({
         width,
         height,
-        fps: 30,
+        fps,
         config,
         chapter,
         verses,
@@ -1045,17 +1112,18 @@ export async function generateQuranVideo({
         onProgress,
       });
     } catch (err) {
-      console.warn('تعذر استخدام WebCodecs، جاري التحويل التلقائي لمحرك FFmpeg الاحتياطي:', err);
+      console.warn('تعذر استخدام WebCodecs، جاري التحويل التلقائي لمحرك التسجيل المباشر:', err);
     }
   }
 
   if (!result) {
-    // Fallback to real-time MediaRecorder + FFmpeg.wasm
+    // Fallback to real-time MediaRecorder
     result = await renderWithFFmpegFallback({
       width,
       height,
       canvas,
       ctx,
+      fps,
       config,
       chapter,
       verses,

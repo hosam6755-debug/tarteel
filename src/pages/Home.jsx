@@ -138,7 +138,7 @@ export default function Home({ user, userData }) {
       return;
     }
 
-    // Check Daily Quota (client-side Firestore lookup)
+    // Check Daily Quota (client-side Firestore lookup with timeout safeguard)
     try {
       const today = new Date().toISOString().split('T')[0];
       const q = query(
@@ -146,12 +146,15 @@ export default function Home({ user, userData }) {
         where('userId', '==', user.uid),
         where('date', '==', today)
       );
-      const querySnapshot = await getDocs(q);
+      const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve(null), 2500));
+      const querySnapshot = await Promise.race([getDocs(q), timeoutPromise]);
 
-      const limit = userData?.daily_limit || 2;
-      if (querySnapshot.size >= limit && userData?.role !== 'admin') {
-        alert(`لقد استنفدت الحد اليومي المسموح لك (${limit} فيديو). يرجى المحاولة غداً.`);
-        return;
+      if (querySnapshot) {
+        const limit = userData?.daily_limit || 2;
+        if (querySnapshot.size >= limit && userData?.role !== 'admin') {
+          alert(`لقد استنفدت الحد اليومي المسموح لك (${limit} فيديو). يرجى المحاولة غداً.`);
+          return;
+        }
       }
     } catch (err) {
       console.warn('Quota check skipped or failed:', err);

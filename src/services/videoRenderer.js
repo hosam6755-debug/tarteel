@@ -454,8 +454,10 @@ async function renderWithWebCodecs({
     message: 'جاري تهيئة مسرّع العتاد (WebCodecs) والترميز المباشر لـ MP4...',
   });
 
-  const audioSampleRate = combinedBuffer.sampleRate || 44100;
-  const audioChannels = combinedBuffer.numberOfChannels || 2;
+  // Standardize audio parameters to avoid AAC EncodingError in Chromium
+  // AAC profiles strictly require 44100 or 48000 Hz, and 2 channels (stereo)
+  const audioSampleRate = combinedBuffer.sampleRate === 48000 ? 48000 : 44100;
+  const audioChannels = 2;
 
   const isMobile = isMobileDevice();
   const targetBitrate = isMobile ? 2_000_000 : 5_000_000;
@@ -512,7 +514,7 @@ async function renderWithWebCodecs({
     framerate: fps,
   });
 
-  // 3. Configure AudioEncoder for AAC
+  // 3. Configure AudioEncoder for AAC with safe bitrates
   const candidateAudioBitrates = isMobile ? [128_000, 96_000] : [192_000, 128_000];
   let chosenAudioBitrate = null;
   for (const br of candidateAudioBitrates) {
@@ -534,9 +536,13 @@ async function renderWithWebCodecs({
     throw new Error('ترميز الصوت AAC غير مدعوم بواسطة WebCodecs على هذا المتصفح.');
   }
 
+  let audioEncoderError = null;
   const audioEncoder = new AudioEncoder({
     output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
-    error: (e) => console.error('AudioEncoder error:', e),
+    error: (e) => {
+      console.warn('AudioEncoder error:', e);
+      audioEncoderError = e;
+    },
   });
 
   audioEncoder.configure({
@@ -546,26 +552,34 @@ async function renderWithWebCodecs({
     bitrate: chosenAudioBitrate,
   });
 
-  // 4. Encode audio in chunks of 2048 frames
-  const chunkSize = 2048;
+  // 4. Encode audio in standard AAC chunks of 1024 frames (mandatory fixed-size frames for AAC)
+  const chunkSize = 1024;
   const totalAudioSamples = combinedBuffer.length;
   let audioOffset = 0;
 
-  while (audioOffset < totalAudioSamples) {
-    const currentChunkSize = Math.min(chunkSize, totalAudioSamples - audioOffset);
-    const planarData = new Float32Array(currentChunkSize * audioChannels);
+  const srcNumChannels = combinedBuffer.numberOfChannels || 1;
+  const srcChannel0 = combinedBuffer.getChannelData(0);
+  const srcChannel1 = srcNumChannels > 1 ? combinedBuffer.getChannelData(1) : srcChannel0;
 
-    for (let ch = 0; ch < audioChannels; ch++) {
-      const chData = combinedBuffer.getChannelData(ch);
-      const sub = chData.subarray(audioOffset, audioOffset + currentChunkSize);
-      planarData.set(sub, ch * currentChunkSize);
+  while (audioOffset < totalAudioSamples) {
+    if (audioEncoderError) {
+      throw audioEncoderError;
     }
+
+    const availableFrames = Math.min(chunkSize, totalAudioSamples - audioOffset);
+    // Always allocate full chunkSize * 2 to guarantee 1024 frames for AAC (zero-padded on last chunk)
+    const planarData = new Float32Array(chunkSize * audioChannels);
+
+    // Left channel (ch 0)
+    planarData.set(srcChannel0.subarray(audioOffset, audioOffset + availableFrames), 0);
+    // Right channel (ch 1)
+    planarData.set(srcChannel1.subarray(audioOffset, audioOffset + availableFrames), chunkSize);
 
     const timestampMicros = Math.round((audioOffset / audioSampleRate) * 1_000_000);
     const audioData = new AudioData({
       format: 'f32-planar',
       sampleRate: audioSampleRate,
-      numberOfFrames: currentChunkSize,
+      numberOfFrames: chunkSize,
       numberOfChannels: audioChannels,
       timestamp: timestampMicros,
       data: planarData,
@@ -573,7 +587,11 @@ async function renderWithWebCodecs({
 
     audioEncoder.encode(audioData);
     audioData.close();
-    audioOffset += currentChunkSize;
+    audioOffset += availableFrames;
+  }
+
+  if (audioEncoderError) {
+    throw audioEncoderError;
   }
 
   // 5. Offline Frame-by-Frame Rendering on Canvas (Up to 5x-10x faster than real-time)
@@ -678,6 +696,7 @@ async function renderWithWebCodecs({
   });
 
   await videoEncoder.flush();
+  if (audioEncoderError) throw audioEncoderError;
   await audioEncoder.flush();
   videoEncoder.close();
   audioEncoder.close();

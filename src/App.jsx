@@ -7,40 +7,86 @@ import { doc, getDoc } from 'firebase/firestore';
 import Home from './pages/Home';
 import Login from './pages/Login';
 import AdminDashboard from './pages/AdminDashboard';
+import ErrorBoundary from './components/ErrorBoundary';
 
-export default function App() {
+/**
+ * Wraps a promise with a timeout. If the promise doesn't resolve within
+ * `ms` milliseconds, it resolves with `fallback` instead of hanging forever.
+ * This is critical when Firestore is unreachable (wrong projectId, network
+ * issue, or database not provisioned) — without it the loading spinner never
+ * disappears and the whole app appears broken.
+ */
+function withTimeout(promise, ms, fallback) {
+  const timeout = new Promise((resolve) => setTimeout(() => resolve(fallback), ms));
+  return Promise.race([promise, timeout]);
+}
+
+function AppRouter() {
   const [user, setUser] = useState(null);
-  const [userData, setUserData] = useState(null); // stores role and limits
+  const [userData, setUserData] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    // Safety net: if onAuthStateChanged never fires (Firebase init failure),
+    // clear the loading state after 8 seconds so the app doesn't freeze.
+    const safetyTimer = setTimeout(() => {
+      setLoading(false);
+    }, 8000);
+
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      clearTimeout(safetyTimer);
       setUser(currentUser);
+
       if (currentUser) {
-        // Fetch user data from firestore
         try {
           const userDocRef = doc(db, 'users', currentUser.uid);
-          const userSnap = await getDoc(userDocRef);
-          if (userSnap.exists()) {
+
+          // Race Firestore read against a 5-second timeout.
+          // If Firestore is unreachable, fall back to default permissions
+          // so the app still loads instead of hanging on "جاري التحميل...".
+          const userSnap = await withTimeout(
+            getDoc(userDocRef),
+            5000,
+            null // null = timeout, treat as not found
+          );
+
+          if (userSnap && userSnap.exists()) {
             setUserData(userSnap.data());
           } else {
-            // User just signed up, wait for the profile to be created or handle it
+            // Either doc doesn't exist yet, or Firestore timed-out — use safe defaults
             setUserData({ role: 'user', daily_limit: 2 });
           }
         } catch (error) {
-          console.error("Error fetching user role:", error);
+          console.error('Error fetching user role:', error);
+          // On Firestore error, default to basic user permissions
+          setUserData({ role: 'user', daily_limit: 2 });
         }
       } else {
         setUserData(null);
       }
+
       setLoading(false);
     });
-    return () => unsubscribe();
+
+    return () => {
+      clearTimeout(safetyTimer);
+      unsubscribe();
+    };
   }, []);
 
   if (loading) {
     return (
-      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', background: '#030712', color: '#fff' }}>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          height: '100vh',
+          background: '#030712',
+          color: '#fff',
+          fontFamily: "'Cairo', 'Segoe UI', sans-serif",
+        }}
+      >
         <p>جاري التحميل...</p>
       </div>
     );
@@ -49,23 +95,31 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route 
-          path="/login" 
-          element={user ? <Navigate to="/" /> : <Login />} 
+        <Route
+          path="/login"
+          element={user ? <Navigate to="/" /> : <Login />}
         />
-        <Route 
-          path="/" 
-          element={user ? <Home user={user} userData={userData} /> : <Navigate to="/login" />} 
+        <Route
+          path="/"
+          element={user ? <Home user={user} userData={userData} /> : <Navigate to="/login" />}
         />
-        <Route 
-          path="/admin" 
+        <Route
+          path="/admin"
           element={
-            user && userData?.role === 'admin' 
-              ? <AdminDashboard user={user} /> 
+            user && userData?.role === 'admin'
+              ? <AdminDashboard user={user} />
               : <Navigate to="/" />
-          } 
+          }
         />
       </Routes>
     </BrowserRouter>
+  );
+}
+
+export default function App() {
+  return (
+    <ErrorBoundary>
+      <AppRouter />
+    </ErrorBoundary>
   );
 }
